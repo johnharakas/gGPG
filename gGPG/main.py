@@ -172,6 +172,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
                 print(key, ':', sig_info[key])
         else:
             form = '''UNVERIFIED'''
+        self.text_logOutput.appendPlainText(verified.stderr)
         self.verify_textOutput.setPlainText(form)
 
     def sign_text(self):
@@ -182,6 +183,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             if signed_data:
                 print(signed_data.data.decode())
                 self.sign_textOutput.setPlainText(signed_data.data.decode())
+            self.text_logOutput.appendPlainText(signed_data.stderr)
 
     def select_file(self):
         filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
