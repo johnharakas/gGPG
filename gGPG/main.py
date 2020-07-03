@@ -60,12 +60,15 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.encrypt_buttonImport.clicked.connect(partial(self.import_file, 'encrypt_textInput'))
         self.encrypt_buttonRecipients.clicked.connect(self.select_recipients)
         self.encrypt_buttonEncrypt.clicked.connect(self.encrypt_text)
+        self.encrypt_buttonSave.clicked.connect(partial(self.save_file, 'encrypt_textOutput'))
 
         self.decrypt_buttonImport.clicked.connect(partial(self.import_file, 'decrypt_textInput'))
         self.decrypt_buttonDecrypt.clicked.connect(self.decrypt_text)
+        self.decrypt_buttonSave.clicked.connect(partial(self.save_file, 'decrypt_textOutput'))
 
         self.sign_buttonSign.clicked.connect(self.sign_text)
         self.sign_buttonImport.clicked.connect(partial(self.import_file, 'sign_textInput'))
+        self.sign_buttonSave.clicked.connect(partial(self.save_file, 'sign_textOutput'))
 
         self.verify_buttonImport.clicked.connect(partial(self.import_file, 'verify_textInput'))
         self.verify_buttonVerify.clicked.connect(self.verify_text)
@@ -115,6 +118,16 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         child = self.findChild(QPlainTextEdit, box)
         text = self.select_file()
         child.setPlainText(text)
+
+    def save_file(self, box):
+        child = self.findChild(QPlainTextEdit, box)
+        text = child.toPlainText()
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        filename, _ = QFileDialog.getSaveFileName(self, "Open", "", "All Files (*.*)", options=options)
+        if filename:
+            with open(filename, 'w') as file:
+                file.write(text)
 
     def import_public_key(self):
         self.text_logOutput.appendPlainText('importing new public key...')
