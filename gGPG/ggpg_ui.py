@@ -31,7 +31,7 @@ class Ui_TabWindow(object):
         self.main_labelHome.setGeometry(QtCore.QRect(20, 50, 111, 21))
         self.main_labelHome.setObjectName("main_labelHome")
         self.main_labelHomeDir = QtWidgets.QLabel(self.TabMain)
-        self.main_labelHomeDir.setGeometry(QtCore.QRect(140, 50, 131, 21))
+        self.main_labelHomeDir.setGeometry(QtCore.QRect(140, 50, 331, 21))
         self.main_labelHomeDir.setObjectName("main_labelHomeDir")
         self.main_buttonSelectHome = QtWidgets.QPushButton(self.TabMain)
         self.main_buttonSelectHome.setGeometry(QtCore.QRect(20, 80, 91, 25))

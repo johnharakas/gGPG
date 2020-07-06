@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from functools import partial
@@ -8,7 +9,16 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QDialog, QPlainTextEdit
 
 import gpg_utils
 from ggpg_ui import Ui_TabWindow
+from gpg_utils import GPG_Handler
 from recipient_ui import Ui_Recipient_Dialog
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+handler.setLevel(logging.DEBUG)
+# formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 
 class Recipient_Ui(QDialog, Ui_Recipient_Dialog):
@@ -47,13 +57,23 @@ class Recipient_Ui(QDialog, Ui_Recipient_Dialog):
 class App(QtWidgets.QMainWindow, Ui_TabWindow):
     def __init__(self, parent=None):
         super(App, self).__init__(parent)
+        logger.debug('Creating class %s' % self)
+        default_home = str(Path.home())
+        if os.path.exists(default_home + '/.gnupg'):
+            self.home_dir = default_home + '/.gnupg'
+        else:
+            self.home_dir = default_home
+        logger.debug('Using directory %s' % self.home_dir)
+
+        self.gpg = GPG_Handler(homedir=self.home_dir)
+        logger.debug('GPG Handler created.')
+
         self.setupUi(self)
         self.actionQuit.triggered.connect(self.close)
 
-        self.main_labelGPGversion.setText(gpg_utils.gpg_version)
+        self.main_labelGPGversion.setText(self.gpg.gpg_version)
         self.main_buttonSelectHome.clicked.connect(self.set_homedir)
-        self.home_dir = str(Path.home())
-        self.text_logOutput.appendPlainText('setting homedir: {}'.format(self.home_dir))
+        self.text_logOutput.appendPlainText('setting gpg homedir: {}'.format(self.home_dir))
         self.main_labelHomeDir.setText(self.home_dir)
 
         self.encrypt_buttonImport.clicked.connect(partial(self.import_file, 'encrypt_textInput'))
@@ -99,18 +119,19 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.home_dir = path
             print(path)
             self.main_labelHomeDir.setText(self.home_dir)
-        gpg_utils.gpg = gpg_utils.set_homedir(homedir=self.home_dir)
-        print('setting gpg homedir:')
-        print(gpg_utils.gpg.gnupghome)
+        self.gpg.set_homedir(homedir=self.home_dir, keyring=[])
+        self.lookup_secret_keys()
+        self.lookup_public_keys()
+        print(self.gpg.gnupghome)
         self.text_logOutput.appendPlainText('setting homedir: {}'.format(self.home_dir))
         return
 
     def lookup_public_keys(self):
-        self.pubkeys_loaded = gpg_utils.keyring_info(private=False)
+        self.pubkeys_loaded = self.gpg.keyring_info(private=False)
         print('Found {} public key(s)'.format(len(self.privkeys_loaded)))
 
     def lookup_secret_keys(self):
-        self.privkeys_loaded = gpg_utils.keyring_info(private=True)
+        self.privkeys_loaded = self.gpg.keyring_info(private=True)
         print('Found {} secret key(s)'.format(len(self.privkeys_loaded)))
         self.combo_currentKey.blockSignals(True)
         self.combo_currentKey.clear()
@@ -118,75 +139,81 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             print(key)
             self.combo_currentKey.addItem("")
             self.combo_currentKey.setItemText(idx, key)
-        print('Changing keyring to keyring: ', self.combo_currentKey.currentText())
         self.combo_currentKey.blockSignals(False)
         self.update_current_key()
 
     def lookup_keys(self):
         # No longer used.
         # Lookup private keys
-        self.privkeys_loaded = gpg_utils.keyring_info(private=True)
+        self.privkeys_loaded = self.gpg.keyring_info(private=True)
         print('Found {} key(s)'.format(len(self.privkeys_loaded)))
         for idx, key in enumerate(self.privkeys_loaded):
             print(key)
             self.combo_currentKey.addItem("")
             self.combo_currentKey.setItemText(idx, key)
 
-        self.pubkeys_loaded = gpg_utils.keyring_info(private=False)
+        self.pubkeys_loaded = self.gpg.keyring_info(private=False)
         self.update_current_key()
 
     def update_current_key(self):
         self.current_key = self.privkeys_loaded[self.combo_currentKey.currentText()]
-        print('Current Key: {} {}'.format(self.current_key['keyid'], self.current_key['uids']))
+        logger.debug('Current key changed to: {}{}'.format(self.current_key['keyid'], self.current_key['uids']))
 
     def import_file(self, box):
         child = self.findChild(QPlainTextEdit, box)
-        text = self.select_file()
+
+        filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
+        logger.debug('{}: importing file: {}'.format(box, filename))
+        if filename[0]:
+            with open(filename[0], 'r') as file:
+                text = file.read()
         child.setPlainText(text)
 
     def save_file(self, box):
         child = self.findChild(QPlainTextEdit, box)
+        logger.debug('{}: saving file'.format(box))
         text = child.toPlainText()
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-
         filename, _ = QFileDialog.getSaveFileName(self, "Open", "", "All Files (*.*)", options=options)
+        logger.debug('{}: saving file: {}'.format(box, filename))
         if filename:
             with open(filename, 'w') as file:
                 file.write(text)
 
     def select_keyring(self):
+        self.print_info()
+
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
 
         dialog = QFileDialog()
         dialog.setFilter(QtCore.QDir.AllEntries | QtCore.QDir.Hidden)
         filename = dialog.getOpenFileName(self, 'Open File', str(Path.home()), options=options)
+        logger.debug('select_keyring: opening keyring file'.format(filename))
         if filename[0]:
             # Fix this to make sure is a valid keyring file.
             if filename[0].endswith('.gpg') or filename[0].endswith('.kbx'):
                 self.log('using keyring: {}'.format(filename[0]))
                 # Add keyring to list
                 self.keyrings.append(filename[0])
-                # gpg_utils.gpg.keyring = [filename[0]]
-                gpg_utils.gpg.keyring = ['',filename[0]]
-                # gpg_utils.gpg.gnupghome =
+                self.gpg.keyring.append(filename[0])
                 self.keyring_labelCurrentKeyPath.setText(filename[0])
-                print(filename)
+
                 self.home_dir = os.path.dirname(filename[0])
-                gpg_utils.gpg = gpg_utils.set_homedir(homedir=self.home_dir)
+                self.gpg.set_homedir(homedir=self.home_dir)
                 self.lookup_secret_keys()
                 self.lookup_public_keys()
-                print('Adding keys:')
-                gpg_utils.print_keys(private=False)
+                self.gpg.print_keys(private=False)
 
             else:
                 self.log('ERROR {}: keyring must have extension .gpg or .kbx'.format(filename[0]))
+            self.print_info()
 
     def import_public_key(self):
         self.text_logOutput.appendPlainText('importing new public key...')
         pubkey = self.keyring_textInput.toPlainText()
-        imported = gpg_utils.import_key(pubkey)
+        imported = self.gpg.handle_import(pubkey)
         self.text_logOutput.appendPlainText(imported.stderr)
         return
 
@@ -199,7 +226,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         if len(recipients) > 0:
             data = self.encrypt_textInput.toPlainText()
             self.text_logOutput.appendPlainText('encrypting data: {} chars'.format(len(data)))
-            encrypted = gpg_utils.encrypt_text(data=data, recipients=recipients)
+            encrypted = self.gpg.handle_encrypt(data=data, recipients=recipients)
             self.text_logOutput.appendPlainText(encrypted.stderr)
             self.encrypt_textOutput.setPlainText(encrypted.data.decode())
 
@@ -219,7 +246,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
     def decrypt_text(self):
         print('decrypting')
         data = self.decrypt_textInput.toPlainText()
-        decrypted = gpg_utils.decrypt_text(data)
+        decrypted = self.gpg.handle_decrypt(data)
         print(decrypted.data.decode())
         self.text_logOutput.appendPlainText(decrypted.stderr)
         self.decrypt_textOutput.setPlainText(decrypted.data.decode())
@@ -227,18 +254,17 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
 
     def verify_text(self):
         data = self.verify_textInput.toPlainText()
-        verified = gpg_utils.verify_signature(data)
+        verified = self.gpg.handle_verify(data)
         if verified:
             id = next(iter(verified.sig_info.keys()))
             sig_info = verified.sig_info[id] # Get the dict key
 
-            form = '''VERIFIED\n'''
+            form = 'VERIFIED\n'
             form += 'timestamp (formatted) {}\n'.format(gpg_utils.format_time(sig_info['timestamp']))
             for key in sig_info:
                 form += (key + ':' + str(sig_info[key]) + '\n')
-                # print(key, ':', sig_info[key])
         else:
-            form = '''UNVERIFIED'''
+            form = 'UNVERIFIED'
         self.text_logOutput.appendPlainText(verified.stderr)
         self.verify_textOutput.setPlainText(form)
 
@@ -246,20 +272,29 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         keyid = self.current_key['keyid']
         data = self.sign_textInput.toPlainText()
         if data:
-            signed_data = gpg_utils.sign_data(data, keyid=keyid)
+            signed_data = self.gpg.handle_sign(data, keyid=keyid)
             if signed_data:
                 print(signed_data.data.decode())
                 self.sign_textOutput.setPlainText(signed_data.data.decode())
             self.text_logOutput.appendPlainText(signed_data.stderr)
 
-    def select_file(self):
-        filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
-        if filename[0]:
-            # print(filename)
-            with open(filename[0], 'r') as file:
-                text = file.read()
-                return text
-        return
+    def print_info(self):
+        info = '''
+               homedir: {}
+               keyring: {}
+               current key: {}
+               number of private keys: {}
+               number of public keys: {}
+               '''.format(
+            self.gpg.gnupghome,
+            self.gpg.keyring,
+            self.current_key['uids'],
+            len(self.privkeys_loaded),
+            len(self.pubkeys_loaded)
+        )
+        print('-------------------------')
+        print(info)
+        print('-------------------------')
 
 
 def main():
