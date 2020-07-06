@@ -2,13 +2,21 @@ from datetime import datetime
 
 import gnupg
 
+# class GPG_Handler(gnupg.GPG):
+#     def __init__(self, homedir):
+#         super().__init__()
+#         self.homedir = homedir
+#         self.gnupghome = self.homedir
+
+
 print(gnupg.__version__)
 homedir = '/home/modp/.gnupg_test'
+# homedir = '/home/modp/.gnupg'
 
 try:
-    gpg = gnupg.GPG(gnupghome=homedir)
+    gpg = gnupg.GPG(gnupghome=homedir, keyring=[])
 except TypeError:
-    gpg = gnupg.GPG(homedir=homedir)
+    gpg = gnupg.GPG(homedir=homedir, keyring=[])
 gpg_version = '{}.{}.{}'.format(*gpg.version)
 
 
@@ -35,12 +43,20 @@ def keyring_info(private=True):
     return key_dict
 
 
-def set_homedir(dir='/home/modp/.gnupg_test'):
-    try:
-        gpg = gnupg.GPG(gnupghome=dir)
-    except TypeError:
-        gpg = gnupg.GPG(homedir=dir)
+def print_keys(private=False):
+    keylist = gpg.list_keys(private)
+    for idx, key in enumerate(keylist):
+        uid = str(key['uids'])
+        keyid = key['keyid']
+        print(uid, keyid)
 
+
+
+def set_homedir(homedir='/home/modp/.gnupg_test', keyring=[]):
+    try:
+        gpg = gnupg.GPG(gnupghome=homedir, keyring=keyring)
+    except TypeError:
+        gpg = gnupg.GPG(homedir=homedir, keyring=keyring)
     return gpg
 
 
@@ -49,9 +65,9 @@ def import_key(key):
     return imported
 
 
-def encrypt_text(data, recipients):
-    extra = []
-    encr = gpg.encrypt(data=data, recipients=recipients, extra_args=extra)
+def encrypt_text(data, recipients, keyring=None):
+    extra = ['--keyring ', keyring]
+    encr = gpg.encrypt(data=data, recipients=recipients, extra_args=keyring,)
     return encr
 
 

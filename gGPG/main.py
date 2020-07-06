@@ -1,3 +1,4 @@
+import os
 import sys
 from functools import partial
 from pathlib import Path
@@ -36,10 +37,8 @@ class Recipient_Ui(QDialog, Ui_Recipient_Dialog):
         Select checked recipients and return to the main window.
         :return: selected - list of dictionary keys for App.pubkeys_loaded
         """
-        print('RECIPIENTS')
         for index in range(self.list_recipients.count()):
             item = self.list_recipients.item(index)
-            print('Item {} {}'.format(item.checkState(),item.text()))
             if item.checkState() == QtCore.Qt.Checked:
                 self.selected.append(item.text())
         self.accept()
@@ -72,15 +71,23 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
 
         self.verify_buttonImport.clicked.connect(partial(self.import_file, 'verify_textInput'))
         self.verify_buttonVerify.clicked.connect(self.verify_text)
+        self.verify_buttonSave.clicked.connect(partial(self.save_file, 'verify_textOutput'))
 
+        self.keyring_buttonSelectKeyring.clicked.connect(self.select_keyring)
         self.keyring_buttonImportKey.clicked.connect(self.import_public_key)
         self.keyring_buttonImport.clicked.connect(partial(self.import_file, 'keyring_textInput'))
 
+        self.keyrings = []
         self.current_key = ()
         self.pubkeys_loaded = {}
         self.privkeys_loaded = {}
-        self.lookup_keys()
+        self.lookup_secret_keys()
+        self.lookup_public_keys()
+
         self.combo_currentKey.currentIndexChanged.connect(self.update_current_key)
+
+    def log(self, msg):
+        self.text_logOutput.appendPlainText(msg)
 
     def set_homedir(self):
         path = QFileDialog.getExistingDirectory(self,
@@ -92,13 +99,31 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.home_dir = path
             print(path)
             self.main_labelHomeDir.setText(self.home_dir)
-        gpg_utils.gpg = gpg_utils.set_homedir(dir=self.home_dir)
+        gpg_utils.gpg = gpg_utils.set_homedir(homedir=self.home_dir)
         print('setting gpg homedir:')
         print(gpg_utils.gpg.gnupghome)
         self.text_logOutput.appendPlainText('setting homedir: {}'.format(self.home_dir))
         return
 
+    def lookup_public_keys(self):
+        self.pubkeys_loaded = gpg_utils.keyring_info(private=False)
+        print('Found {} public key(s)'.format(len(self.privkeys_loaded)))
+
+    def lookup_secret_keys(self):
+        self.privkeys_loaded = gpg_utils.keyring_info(private=True)
+        print('Found {} secret key(s)'.format(len(self.privkeys_loaded)))
+        self.combo_currentKey.blockSignals(True)
+        self.combo_currentKey.clear()
+        for idx, key in enumerate(self.privkeys_loaded):
+            print(key)
+            self.combo_currentKey.addItem("")
+            self.combo_currentKey.setItemText(idx, key)
+        print('Changing keyring to keyring: ', self.combo_currentKey.currentText())
+        self.combo_currentKey.blockSignals(False)
+        self.update_current_key()
+
     def lookup_keys(self):
+        # No longer used.
         # Lookup private keys
         self.privkeys_loaded = gpg_utils.keyring_info(private=True)
         print('Found {} key(s)'.format(len(self.privkeys_loaded)))
@@ -112,7 +137,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
 
     def update_current_key(self):
         self.current_key = self.privkeys_loaded[self.combo_currentKey.currentText()]
-        print('Current Key: {} {}'.format(self.current_key['uids'], self.current_key['keyid']))
+        print('Current Key: {} {}'.format(self.current_key['keyid'], self.current_key['uids']))
 
     def import_file(self, box):
         child = self.findChild(QPlainTextEdit, box)
@@ -124,10 +149,39 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         text = child.toPlainText()
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
+
         filename, _ = QFileDialog.getSaveFileName(self, "Open", "", "All Files (*.*)", options=options)
         if filename:
             with open(filename, 'w') as file:
                 file.write(text)
+
+    def select_keyring(self):
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+
+        dialog = QFileDialog()
+        dialog.setFilter(QtCore.QDir.AllEntries | QtCore.QDir.Hidden)
+        filename = dialog.getOpenFileName(self, 'Open File', str(Path.home()), options=options)
+        if filename[0]:
+            # Fix this to make sure is a valid keyring file.
+            if filename[0].endswith('.gpg') or filename[0].endswith('.kbx'):
+                self.log('using keyring: {}'.format(filename[0]))
+                # Add keyring to list
+                self.keyrings.append(filename[0])
+                # gpg_utils.gpg.keyring = [filename[0]]
+                gpg_utils.gpg.keyring = ['',filename[0]]
+                # gpg_utils.gpg.gnupghome =
+                self.keyring_labelCurrentKeyPath.setText(filename[0])
+                print(filename)
+                self.home_dir = os.path.dirname(filename[0])
+                gpg_utils.gpg = gpg_utils.set_homedir(homedir=self.home_dir)
+                self.lookup_secret_keys()
+                self.lookup_public_keys()
+                print('Adding keys:')
+                gpg_utils.print_keys(private=False)
+
+            else:
+                self.log('ERROR {}: keyring must have extension .gpg or .kbx'.format(filename[0]))
 
     def import_public_key(self):
         self.text_logOutput.appendPlainText('importing new public key...')
@@ -182,7 +236,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             form += 'timestamp (formatted) {}\n'.format(gpg_utils.format_time(sig_info['timestamp']))
             for key in sig_info:
                 form += (key + ':' + str(sig_info[key]) + '\n')
-                print(key, ':', sig_info[key])
+                # print(key, ':', sig_info[key])
         else:
             form = '''UNVERIFIED'''
         self.text_logOutput.appendPlainText(verified.stderr)
@@ -201,7 +255,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
     def select_file(self):
         filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
         if filename[0]:
-            print(filename)
+            # print(filename)
             with open(filename[0], 'r') as file:
                 text = file.read()
                 return text
