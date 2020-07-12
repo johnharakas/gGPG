@@ -4,12 +4,14 @@ import sys
 from functools import partial
 from pathlib import Path
 
+import magic
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtWidgets import QApplication, QFileDialog, QDialog, QPlainTextEdit
 
 import gpg_utils
 from ggpg_ui import Ui_TabWindow
 from gpg_utils import GPG_Handler
+from keyView_ui import Ui_KeyViewer
 from recipient_ui import Ui_Recipient_Dialog
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,54 @@ handler.setLevel(logging.DEBUG)
 # formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 # handler.setFormatter(formatter)
 logger.addHandler(handler)
+
+
+class KeyView_Ui(QDialog, Ui_KeyViewer):
+    def __init__(self, gpg, keys):
+        super(KeyView_Ui, self).__init__()
+        self.setupUi(self)
+
+        self.button_close.clicked.connect(self.close)
+        self.button_save.clicked.connect(self.save_key)
+        self.gpg = gpg
+        self.keys = keys
+        self.current_key = None
+        self.load_keys()
+        self.combo_keyList.currentIndexChanged.connect(self.update_current_key)
+        self.show()
+
+    def update_current_key(self):
+        self.current_key = self.keys[self.combo_keyList.currentText()]
+        logger.debug('Current key changed to: {}{}'.format(self.current_key['keyid'], self.current_key['uids']))
+        self.key_textOutput.setPlainText(self.current_key['keyblock'])
+
+    def load_keys(self):
+        for idx, key in enumerate(self.keys):
+            # Get the block for each key in self.keys
+            # Create new dictionary field 'keyblock'
+            self.keys[key]['keyblock'] = self.gpg.handle_export(self.keys[key], armor=True)
+            self.combo_keyList.addItem("")
+            self.combo_keyList.setItemText(idx, key)
+        self.update_current_key()
+
+    def save_key(self):
+        default_name = self.current_key['uids'][0] + '.gpg'
+        if self.armor_check.isChecked():
+            text = self.current_key['keyblock']
+        else:
+            text = self.gpg.handle_export(self.current_key, armor=False)
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        filename, _ = QFileDialog.getSaveFileName(self, "Open", default_name, "All Files (*.*)", options=options)
+        logger.debug('saving key to: {}'.format(filename))
+
+        flags = 'w'
+        if type(text) is bytes:
+            flags += 'b'
+        if filename:
+            with open(filename, flags) as file:
+                file.write(text)
+        return
 
 
 class Recipient_Ui(QDialog, Ui_Recipient_Dialog):
@@ -58,11 +108,13 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
     def __init__(self, parent=None):
         super(App, self).__init__(parent)
         logger.debug('Creating class %s' % self)
-        default_home = str(Path.home())
-        if os.path.exists(default_home + '/.gnupg'):
-            self.home_dir = default_home + '/.gnupg'
+
+        self.default_home = str(Path.home())
+
+        if os.path.exists(self.default_home + '/.gnupg'):
+            self.home_dir = self.default_home + '/.gnupg'
         else:
-            self.home_dir = default_home
+            self.home_dir = self.default_home
         logger.debug('Using directory %s' % self.home_dir)
 
         self.gpg = GPG_Handler(homedir=self.home_dir)
@@ -74,12 +126,18 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.main_labelGPGversion.setText(self.gpg.gpg_version)
         self.main_buttonSelectHome.clicked.connect(self.set_homedir)
         self.text_logOutput.appendPlainText('setting gpg homedir: {}'.format(self.home_dir))
+        self.main_exportPubkey.clicked.connect(self.view_key)
         self.main_labelHomeDir.setText(self.home_dir)
+
 
         self.encrypt_buttonImport.clicked.connect(partial(self.import_file, 'encrypt_textInput'))
         self.encrypt_buttonRecipients.clicked.connect(self.select_recipients)
         self.encrypt_buttonEncrypt.clicked.connect(self.encrypt_text)
         self.encrypt_buttonSave.clicked.connect(partial(self.save_file, 'encrypt_textOutput'))
+
+        self.symmetric_buttonImport.clicked.connect(partial(self.import_file, 'symmetric_textInput'))
+        self.symmetric_buttonEncrypt.clicked.connect(self.encrypt_symmetric)
+        self.symmetric_buttonSave.clicked.connect(partial(self.save_file, 'symmetric_textOutput'))
 
         self.decrypt_buttonImport.clicked.connect(partial(self.import_file, 'decrypt_textInput'))
         self.decrypt_buttonDecrypt.clicked.connect(self.decrypt_text)
@@ -103,6 +161,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.privkeys_loaded = {}
         self.lookup_secret_keys()
         self.lookup_public_keys()
+        self._output_buffer = []
 
         self.combo_currentKey.currentIndexChanged.connect(self.update_current_key)
 
@@ -110,6 +169,8 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.text_logOutput.appendPlainText(msg)
 
     def set_homedir(self):
+        old_dir = self.home_dir
+
         path = QFileDialog.getExistingDirectory(self,
                                                     "Open Directory",
                                                     str(Path.home()),
@@ -119,9 +180,24 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.home_dir = path
             print(path)
             self.main_labelHomeDir.setText(self.home_dir)
-        self.gpg.set_homedir(homedir=self.home_dir, keyring=[])
-        self.lookup_secret_keys()
-        self.lookup_public_keys()
+
+        # TODO: better way to handle when a new home dir isn't valid
+        # backup just in case.
+        try:
+            self.gpg.set_homedir(homedir=self.home_dir, keyring=[])
+            self.lookup_secret_keys()
+            self.lookup_public_keys()
+        except KeyError as k:
+            # If its not valid gpg homedir, will throw a keyerror
+            self.log('not a valid gpg homedir: {}'.format(self.home_dir))
+            self.log('switching back to: {}'.format(old_dir))
+            self.home_dir = old_dir
+            self.gpg.set_homedir(homedir=self.home_dir, keyring=[])
+            self.lookup_secret_keys()
+            self.lookup_public_keys()
+
+
+
         print(self.gpg.gnupghome)
         self.text_logOutput.appendPlainText('setting homedir: {}'.format(self.home_dir))
         return
@@ -142,48 +218,65 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.combo_currentKey.blockSignals(False)
         self.update_current_key()
 
-    def lookup_keys(self):
-        # No longer used.
-        # Lookup private keys
-        self.privkeys_loaded = self.gpg.keyring_info(private=True)
-        print('Found {} key(s)'.format(len(self.privkeys_loaded)))
-        for idx, key in enumerate(self.privkeys_loaded):
-            print(key)
-            self.combo_currentKey.addItem("")
-            self.combo_currentKey.setItemText(idx, key)
-
-        self.pubkeys_loaded = self.gpg.keyring_info(private=False)
-        self.update_current_key()
-
     def update_current_key(self):
         self.current_key = self.privkeys_loaded[self.combo_currentKey.currentText()]
         logger.debug('Current key changed to: {}{}'.format(self.current_key['keyid'], self.current_key['uids']))
 
     def import_file(self, box):
         child = self.findChild(QPlainTextEdit, box)
-
         filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
         logger.debug('{}: importing file: {}'.format(box, filename))
         if filename[0]:
-            with open(filename[0], 'r') as file:
-                text = file.read()
+            self.log('opening {}'.format(filename[0]))
+            filetype = magic.from_file(filename[0], mime=True)
+            if filetype == 'text/plain':
+                with open(filename[0], 'r') as file:
+                    text = file.read()
+                self.log('ok')
+            else:
+                text = ''
+                self.log('could not open file type: {}'.format(filetype))
         child.setPlainText(text)
 
+    def save_buffer(self, data):
+        # If saving binary stuff, send it here first.
+        # The save function will
+        # if box:
+        #     child = self.findChild(QPlainTextEdit, box)
+        #     logger.debug('{}: saving file'.format(box))
+        #     data = child.toPlainText()
+
+        self._output_buffer.append(data)
+        return
+
     def save_file(self, box):
-        child = self.findChild(QPlainTextEdit, box)
-        logger.debug('{}: saving file'.format(box))
-        text = child.toPlainText()
+        if len(self._output_buffer) > 0:
+            text = self._output_buffer.pop()
+        else:
+            child = self.findChild(QPlainTextEdit, box)
+            logger.debug('{}: saving file'.format(box))
+            text = child.toPlainText()
+
+        print(type(text))
+
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
         filename, _ = QFileDialog.getSaveFileName(self, "Open", "", "All Files (*.*)", options=options)
         logger.debug('{}: saving file: {}'.format(box, filename))
+
+        flags = 'w'
+        if type(text) is bytes:
+            flags += 'b'
+
         if filename:
-            with open(filename, 'w') as file:
+            with open(filename, flags) as file:
                 file.write(text)
+
+    def view_key(self):
+        self.key_viewer = KeyView_Ui(self.gpg, self.pubkeys_loaded)
 
     def select_keyring(self):
         self.print_info()
-
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
 
@@ -214,7 +307,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.text_logOutput.appendPlainText('importing new public key...')
         pubkey = self.keyring_textInput.toPlainText()
         imported = self.gpg.handle_import(pubkey)
-        self.text_logOutput.appendPlainText(imported.stderr)
+        self.log(imported.stderr)
         return
 
     def encrypt_text(self):
@@ -224,11 +317,48 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         for recip in self.recipientDialog.selected:
             recipients.append(self.pubkeys_loaded[recip]['uids'][0])
         if len(recipients) > 0:
+
             data = self.encrypt_textInput.toPlainText()
-            self.text_logOutput.appendPlainText('encrypting data: {} chars'.format(len(data)))
-            encrypted = self.gpg.handle_encrypt(data=data, recipients=recipients)
-            self.text_logOutput.appendPlainText(encrypted.stderr)
-            self.encrypt_textOutput.setPlainText(encrypted.data.decode())
+            self.log('encrypting data.')
+            armor = self.encrypt_checkArmor.isChecked()
+            self.log('armor = {}'.format(armor))
+
+            encrypted = self.gpg.handle_encrypt(data=data, recipients=recipients, armor=armor)
+
+            logger.debug('armor = {}'.format(armor))
+            if armor:
+                logger.debug('encrypted text should be ascii')
+                self.encrypt_textOutput.setPlainText(encrypted.data.decode())
+            else:
+                logger.debug('encrypted text should be binary')
+                logger.debug('putting encrypted data in buffer to save')
+                self.save_buffer(data=encrypted.data)
+                self.encrypt_textOutput.setPlainText('Preview not available - Binary output. Save to a file.')
+            self.log(encrypted.stderr)
+
+    def encrypt_symmetric(self):
+        logger.debug('perfoming symmetric encryption')
+
+        armor = self.symmetric_checkArmor.isChecked()
+        logger.debug('armor = {}'.format(armor))
+
+        cipher = self.symmetric_comboCipher.currentText()
+        logger.debug('cipher = {}'.format(cipher))
+
+        data = self.symmetric_textInput.toPlainText()
+
+        encrypted = self.gpg.handle_encrypt_symmetric(data, armor=armor, cipher=cipher)
+
+        self.log(encrypted.stderr)
+        self.log(encrypted.status)
+
+        if armor:
+            logger.debug('encrypted text should be ascii')
+            self.symmetric_textOutput.setPlainText(encrypted.data.decode())
+        else:
+            logger.debug('putting encrypted data in buffer to save')
+            self.save_buffer(data=encrypted.data)
+            self.symmetric_textOutput.setPlainText('Preview not available - Binary output. Save to a file.')
 
     def select_recipients(self):
         self.encrypt_listRecipient.clear()
@@ -240,7 +370,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
                 item = QtWidgets.QListWidgetItem()
                 item.setText(recip)
                 self.encrypt_listRecipient.addItem(item)
-                self.text_logOutput.appendPlainText('adding recipient: {}'.format(recip))
+                self.log('adding recipient: {}'.format(recip))
             return self.selected_recipients
 
     def decrypt_text(self):
@@ -248,7 +378,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         data = self.decrypt_textInput.toPlainText()
         decrypted = self.gpg.handle_decrypt(data)
         print(decrypted.data.decode())
-        self.text_logOutput.appendPlainText(decrypted.stderr)
+        self.log(decrypted.stderr)
         self.decrypt_textOutput.setPlainText(decrypted.data.decode())
         return
 

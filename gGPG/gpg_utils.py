@@ -49,10 +49,27 @@ class GPG_Handler(gnupg.GPG):
         imported = self.import_keys(key)
         return imported
 
-    def handle_encrypt(self, data, recipients, keyring=None):
+    def handle_encrypt(self, data, recipients, armor=True, keyring=None):
         extra = ['--keyring ', keyring]
-        encr = self.encrypt(data=data, recipients=recipients, extra_args=keyring,)
+        encr = self.encrypt(data=data, armor=armor, recipients=recipients, extra_args=keyring,)
         return encr
+
+    def handle_encrypt_symmetric(self, data, is_file=False, output=None, armor=False, cipher='AES256'):
+        if is_file:
+            with open(data, 'rb') as f:
+                status = self.encrypt_file(f,
+                                           recipients=None,
+                                           symmetric=cipher,
+                                           armor=armor,
+                                           output=output)
+                return status
+        else:
+            status = self.encrypt(data,
+                                  recipients=None,
+                                  symmetric=cipher,
+                                  armor=armor,
+                                  output=output)
+            return status
 
     def handle_decrypt(self, text):
         decrypted = self.decrypt(text)
@@ -71,3 +88,7 @@ class GPG_Handler(gnupg.GPG):
         signed_data = self.sign(data, keyid=keyid)
         if signed_data.status == 'signature created':
             return signed_data
+
+    def handle_export(self, key, armor=True):
+        print(key)
+        return self.export_keys(key['fingerprint'], armor=armor)
