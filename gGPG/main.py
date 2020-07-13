@@ -1,3 +1,4 @@
+import collections
 import logging
 import os
 import sys
@@ -13,6 +14,9 @@ from ggpg_ui import Ui_TabWindow
 from gpg_utils import GPG_Handler
 from keyView_ui import Ui_KeyViewer
 from recipient_ui import Ui_Recipient_Dialog
+
+# TODO: GPG_Handler should really take care of input/output
+TextBuffer = collections.namedtuple('TextBuffer', ['parent', 'data'])
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -139,9 +143,15 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.symmetric_buttonEncrypt.clicked.connect(self.encrypt_symmetric)
         self.symmetric_buttonSave.clicked.connect(partial(self.save_file, 'symmetric_textOutput'))
 
-        self.decrypt_buttonImport.clicked.connect(partial(self.import_file, 'decrypt_textInput'))
         self.decrypt_buttonDecrypt.clicked.connect(self.decrypt_text)
-        self.decrypt_buttonSave.clicked.connect(partial(self.save_file, 'decrypt_textOutput'))
+        self.decrypt_buttonImport.clicked.connect(partial(
+            self.import_file,
+            'decrypt_textInput',
+            ('text/plain',
+             'application/octet-stream',
+             'application/pgp')))
+
+        self.decrypt_buttonSave.clicked.connect(partial(self.save_file, 'decrypt_textOutput', ('text/plain', 'application/octet-stream')))
 
         self.sign_buttonSign.clicked.connect(self.sign_text)
         self.sign_buttonImport.clicked.connect(partial(self.import_file, 'sign_textInput'))
@@ -153,7 +163,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
 
         self.keyring_buttonSelectKeyring.clicked.connect(self.select_keyring)
         self.keyring_buttonImportKey.clicked.connect(self.import_public_key)
-        self.keyring_buttonImport.clicked.connect(partial(self.import_file, 'keyring_textInput'))
+        self.keyring_buttonImport.clicked.connect(partial(self.import_file, 'keyring_textInput',['application/pgp-keys']))
 
         self.keyrings = []
         self.current_key = ()
@@ -196,15 +206,13 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.lookup_secret_keys()
             self.lookup_public_keys()
 
-
-
         print(self.gpg.gnupghome)
         self.text_logOutput.appendPlainText('setting homedir: {}'.format(self.home_dir))
         return
 
     def lookup_public_keys(self):
         self.pubkeys_loaded = self.gpg.keyring_info(private=False)
-        print('Found {} public key(s)'.format(len(self.privkeys_loaded)))
+        print('Found {} public key(s)'.format(len(self.pubkeys_loaded)))
 
     def lookup_secret_keys(self):
         self.privkeys_loaded = self.gpg.keyring_info(private=True)
@@ -222,21 +230,37 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.current_key = self.privkeys_loaded[self.combo_currentKey.currentText()]
         logger.debug('Current key changed to: {}{}'.format(self.current_key['keyid'], self.current_key['uids']))
 
-    def import_file(self, box):
+    def import_file(self, box, mimetype='text/plain'):
+        print(mimetype)
         child = self.findChild(QPlainTextEdit, box)
-        filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()))
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        filename = QFileDialog.getOpenFileName(self, 'Open File', str(Path.home()), options=options)
         logger.debug('{}: importing file: {}'.format(box, filename))
         if filename[0]:
             self.log('opening {}'.format(filename[0]))
             filetype = magic.from_file(filename[0], mime=True)
-            if filetype == 'text/plain':
-                with open(filename[0], 'r') as file:
-                    text = file.read()
+            print(filename)
+            print(filetype)
+            print(mimetype)
+            if filetype in mimetype:
+                try:
+                    with open(filename[0], 'r') as file:
+                        text = file.read()
+                        child.setPlainText(text)
+                except UnicodeDecodeError as err:
+                    print(err)
+                    with open(filename[0], 'rb') as file:
+                        logger.debug('{} seems to be binary'.format(filename[0]))
+                        text = file.read()
+                        logger.debug('Creating TextBuffer: parent={}'.format(box))
+                        buffered_text = TextBuffer(parent=box, data=text)
+                        self.save_buffer(buffered_text)
+                        child.setPlainText('Preview not available - binary')
+
                 self.log('ok')
             else:
-                text = ''
                 self.log('could not open file type: {}'.format(filetype))
-        child.setPlainText(text)
 
     def save_buffer(self, data):
         # If saving binary stuff, send it here first.
@@ -250,28 +274,46 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         return
 
     def save_file(self, box):
+        '''
+        Function to save file: the button that calls this function will pass itself.
+        That way, the function knows which textbox to output the data to.
+
+        * Binaries should probably be handled by the GPG_Handler class
+
+        Handling binaries gets a bit tricky here:
+        - Any binary data that is produced by through import/export or encryption should be sent to a
+          text buffer in the form of a named tuple.
+        - If the text buffer is not empty, pop the data from the text buffer (self._output_buffer)
+            - append (b) to the file write flag
+        - Otherwise, get the data from the specified textbox.
+        :param box: the textbox to output to.
+        :return:
+        '''
+        flags = 'w'
+
+        # Check if there is a binary item in the text buffer.
         if len(self._output_buffer) > 0:
-            text = self._output_buffer.pop()
+            data = self._output_buffer.pop()
+            if data.parent == box:
+                text = data.data
+                flags += 'b'
         else:
             child = self.findChild(QPlainTextEdit, box)
             logger.debug('{}: saving file'.format(box))
             text = child.toPlainText()
 
-        print(type(text))
 
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
         filename, _ = QFileDialog.getSaveFileName(self, "Open", "", "All Files (*.*)", options=options)
         logger.debug('{}: saving file: {}'.format(box, filename))
 
-        flags = 'w'
-        if type(text) is bytes:
-            flags += 'b'
-
         if filename:
             with open(filename, flags) as file:
                 file.write(text)
 
+    # Open the key block viewer.
+    # TODO: Add option for viewing/exporting secret keys
     def view_key(self):
         self.key_viewer = KeyView_Ui(self.gpg, self.pubkeys_loaded)
 
@@ -285,7 +327,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         filename = dialog.getOpenFileName(self, 'Open File', str(Path.home()), options=options)
         logger.debug('select_keyring: opening keyring file'.format(filename))
         if filename[0]:
-            # Fix this to make sure is a valid keyring file.
+            # TODO: check mimetype instead to make sure is a valid keyring
             if filename[0].endswith('.gpg') or filename[0].endswith('.kbx'):
                 self.log('using keyring: {}'.format(filename[0]))
                 # Add keyring to list
@@ -304,18 +346,21 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.print_info()
 
     def import_public_key(self):
-        self.text_logOutput.appendPlainText('importing new public key...')
+        self.log('importing new public key...')
         pubkey = self.keyring_textInput.toPlainText()
         imported = self.gpg.handle_import(pubkey)
         self.log(imported.stderr)
+        self.lookup_public_keys()
         return
 
+    # Encrypt data using public key
     def encrypt_text(self):
         if not hasattr(self, 'selected_recipients'):
             self.select_recipients()
         recipients = []
         for recip in self.recipientDialog.selected:
             recipients.append(self.pubkeys_loaded[recip]['uids'][0])
+
         if len(recipients) > 0:
 
             data = self.encrypt_textInput.toPlainText()
@@ -332,10 +377,11 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             else:
                 logger.debug('encrypted text should be binary')
                 logger.debug('putting encrypted data in buffer to save')
-                self.save_buffer(data=encrypted.data)
+                self.save_buffer(TextBuffer(parent='encrypt_textInput', data=encrypted.data))
                 self.encrypt_textOutput.setPlainText('Preview not available - Binary output. Save to a file.')
             self.log(encrypted.stderr)
 
+    # Encrypt data using symmetric key
     def encrypt_symmetric(self):
         logger.debug('perfoming symmetric encryption')
 
@@ -360,6 +406,7 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             self.save_buffer(data=encrypted.data)
             self.symmetric_textOutput.setPlainText('Preview not available - Binary output. Save to a file.')
 
+    # Select recipients for encryption.
     def select_recipients(self):
         self.encrypt_listRecipient.clear()
         self.recipientDialog = Recipient_Ui(pubkeys=self.pubkeys_loaded)
@@ -373,9 +420,21 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
                 self.log('adding recipient: {}'.format(recip))
             return self.selected_recipients
 
+    # Decrypt either ascii or binary data
     def decrypt_text(self):
         print('decrypting')
-        data = self.decrypt_textInput.toPlainText()
+        # Check the text buffer if decrypting binary data
+        if len(self._output_buffer) > 0:
+            buffered = self._output_buffer.pop()
+            logger.debug('decrypting TextBuffer item: parent={}'.format(buffered.parent))
+            # Make sure its the correct source (it always should be)
+            if buffered.parent == 'decrypt_textInput':
+                data = buffered.data
+            else:
+                logger.debug('somethings wrong: received wrong buffered data')
+        else:
+            # If its ascii, just read the textbox
+            data = self.decrypt_textInput.toPlainText()
         decrypted = self.gpg.handle_decrypt(data)
         print(decrypted.data.decode())
         self.log(decrypted.stderr)

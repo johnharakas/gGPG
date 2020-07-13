@@ -47,6 +47,7 @@ class GPG_Handler(gnupg.GPG):
 
     def handle_import(self, key):
         imported = self.import_keys(key)
+
         return imported
 
     def handle_encrypt(self, data, recipients, armor=True, keyring=None):
