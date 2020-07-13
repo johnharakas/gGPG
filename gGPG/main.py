@@ -15,7 +15,7 @@ from gpg_utils import GPG_Handler
 from keyView_ui import Ui_KeyViewer
 from recipient_ui import Ui_Recipient_Dialog
 
-# TODO: GPG_Handler should really take care of input/output
+# TODO: Need to seperate I/O handling from main class - getting too complicated
 TextBuffer = collections.namedtuple('TextBuffer', ['parent', 'data'])
 
 logger = logging.getLogger(__name__)
@@ -144,20 +144,23 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.symmetric_buttonSave.clicked.connect(partial(self.save_file, 'symmetric_textOutput'))
 
         self.decrypt_buttonDecrypt.clicked.connect(self.decrypt_text)
-        self.decrypt_buttonImport.clicked.connect(partial(
-            self.import_file,
-            'decrypt_textInput',
-            ('text/plain',
-             'application/octet-stream',
-             'application/pgp')))
+        self.decrypt_buttonImport.clicked.connect(partial(self.import_file, 'decrypt_textInput',
+                                                          mimetypes=('text/plain',
+                                                                     'application/octet-stream',
+                                                                     'application/pgp')))
 
-        self.decrypt_buttonSave.clicked.connect(partial(self.save_file, 'decrypt_textOutput', ('text/plain', 'application/octet-stream')))
+        self.decrypt_buttonSave.clicked.connect(partial(self.save_file, 'decrypt_textOutput',
+                                                        mimetypes=('text/plain',
+                                                                   'application/octet-stream')))
 
         self.sign_buttonSign.clicked.connect(self.sign_text)
         self.sign_buttonImport.clicked.connect(partial(self.import_file, 'sign_textInput'))
         self.sign_buttonSave.clicked.connect(partial(self.save_file, 'sign_textOutput'))
 
-        self.verify_buttonImport.clicked.connect(partial(self.import_file, 'verify_textInput'))
+        self.verify_buttonImport.clicked.connect(partial(self.import_file, 'verify_textInput',
+                                                         mimetypes=('text/plain',
+                                                                    'application/octet-stream')))
+
         self.verify_buttonVerify.clicked.connect(self.verify_text)
         self.verify_buttonSave.clicked.connect(partial(self.save_file, 'verify_textOutput'))
 
@@ -180,7 +183,6 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
 
     def set_homedir(self):
         old_dir = self.home_dir
-
         path = QFileDialog.getExistingDirectory(self,
                                                     "Open Directory",
                                                     str(Path.home()),
@@ -188,11 +190,8 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
                                                     | QFileDialog.DontResolveSymlinks)
         if path:
             self.home_dir = path
-            print(path)
             self.main_labelHomeDir.setText(self.home_dir)
-
         # TODO: better way to handle when a new home dir isn't valid
-        # backup just in case.
         try:
             self.gpg.set_homedir(homedir=self.home_dir, keyring=[])
             self.lookup_secret_keys()
@@ -230,8 +229,9 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         self.current_key = self.privkeys_loaded[self.combo_currentKey.currentText()]
         logger.debug('Current key changed to: {}{}'.format(self.current_key['keyid'], self.current_key['uids']))
 
-    def import_file(self, box, mimetype='text/plain'):
-        print(mimetype)
+    def import_file(self, box, **kwargs):
+        print(kwargs)
+        mimetypes = kwargs.get('mimetypes')
         child = self.findChild(QPlainTextEdit, box)
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
@@ -242,8 +242,8 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
             filetype = magic.from_file(filename[0], mime=True)
             print(filename)
             print(filetype)
-            print(mimetype)
-            if filetype in mimetype:
+            print(mimetypes)
+            if filetype in mimetypes:
                 try:
                     with open(filename[0], 'r') as file:
                         text = file.read()
@@ -442,7 +442,14 @@ class App(QtWidgets.QMainWindow, Ui_TabWindow):
         return
 
     def verify_text(self):
-        data = self.verify_textInput.toPlainText()
+        # Check if there is a binary item in the text buffer.
+        if len(self._output_buffer) > 0:
+            buffered = self._output_buffer.pop()
+            if buffered.parent == 'verify_textInput':
+                data = buffered.data
+        else:
+            data = self.verify_textInput.toPlainText()
+
         verified = self.gpg.handle_verify(data)
         if verified:
             id = next(iter(verified.sig_info.keys()))
